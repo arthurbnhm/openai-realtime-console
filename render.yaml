@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: realtime-relay
+    env: node
+    buildCommand: npm install
+    startCommand: node relay-server/index.js
+    envVars:
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: PORT
+        value: 10000
+
+  - type: static
+    name: realtime-frontend
+    buildCommand: npm install && npm run build
+    staticPublishPath: ./build
+    envVars:
+      - key: REACT_APP_LOCAL_RELAY_SERVER_URL
+        value: https://realtime-relay.onrender.com

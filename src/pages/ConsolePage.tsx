@@ -94,7 +94,8 @@ export function ConsolePage() {
   const [canPushToTalk, setCanPushToTalk] = useState(true);
   const [isRecording, setIsRecording] = useState(false);
   const [showConversations, setShowConversations] = useState(false);
-  
+  const [circleScale, setCircleScale] = useState(1);
+  const currentScaleRef = useRef(1);
 
   /**
    * Utility for formatting the timing of logs
@@ -252,62 +253,43 @@ export function ConsolePage() {
     let isLoaded = true;
 
     const wavRecorder = wavRecorderRef.current;
-    const clientCanvas = clientCanvasRef.current;
-    let clientCtx: CanvasRenderingContext2D | null = null;
-
     const wavStreamPlayer = wavStreamPlayerRef.current;
-    const serverCanvas = serverCanvasRef.current;
-    let serverCtx: CanvasRenderingContext2D | null = null;
 
     const render = () => {
       if (isLoaded) {
-        if (clientCanvas) {
-          if (!clientCanvas.width || !clientCanvas.height) {
-            clientCanvas.width = clientCanvas.offsetWidth;
-            clientCanvas.height = clientCanvas.offsetHeight;
-          }
-          clientCtx = clientCtx || clientCanvas.getContext('2d');
-          if (clientCtx) {
-            clientCtx.clearRect(0, 0, clientCanvas.width, clientCanvas.height);
-            const result = wavRecorder.recording
-              ? wavRecorder.getFrequencies('voice')
-              : { values: new Float32Array([0]) };
-            WavRenderer.drawBars(
-              clientCanvas,
-              clientCtx,
-              result.values,
-              '#0099ff',
-              10,
-              0,
-              8
-            );
-          }
-        }
-        if (serverCanvas) {
-          if (!serverCanvas.width || !serverCanvas.height) {
-            serverCanvas.width = serverCanvas.offsetWidth;
-            serverCanvas.height = serverCanvas.offsetHeight;
-          }
-          serverCtx = serverCtx || serverCanvas.getContext('2d');
-          if (serverCtx) {
-            serverCtx.clearRect(0, 0, serverCanvas.width, serverCanvas.height);
-            const result = wavStreamPlayer.analyser
-              ? wavStreamPlayer.getFrequencies('voice')
-              : { values: new Float32Array([0]) };
-            WavRenderer.drawBars(
-              serverCanvas,
-              serverCtx,
-              result.values,
-              '#009900',
-              10,
-              0,
-              8
-            );
-          }
-        }
-        window.requestAnimationFrame(render);
+        // Get input amplitude (user speaking)
+        const inputResult = wavRecorder?.recording && wavRecorder.getStatus() === 'recording'
+          ? wavRecorder.getFrequencies('voice')
+          : { values: new Float32Array([0]) };
+
+        // Get output amplitude (assistant speaking)
+        const outputResult = wavStreamPlayer?.analyser
+          ? wavStreamPlayer.getFrequencies('voice')
+          : { values: new Float32Array([0]) };
+
+        // Calculate the average amplitude from both input and output
+        const inputAmplitude = 
+          inputResult.values.reduce((sum, value) => sum + value, 0) / inputResult.values.length;
+        const outputAmplitude = 
+          outputResult.values.reduce((sum, value) => sum + value, 0) / outputResult.values.length;
+
+        // Use the larger of the two amplitudes
+        const amplitude = Math.max(inputAmplitude, outputAmplitude);
+        
+        // Calculate target scale
+        const targetScale = 1 + Math.min(amplitude * 2, 0.5);
+        
+        // Smooth interpolation between current and target scale
+        const smoothingFactor = 0.15; // Adjust this value to control smoothing (0-1)
+        currentScaleRef.current += (targetScale - currentScaleRef.current) * smoothingFactor;
+        
+        // Update the circle scale
+        setCircleScale(currentScaleRef.current);
+
+        requestAnimationFrame(render);
       }
     };
+
     render();
 
     return () => {
@@ -326,6 +308,8 @@ export function ConsolePage() {
 
     // Set instructions
     client.updateSession({ instructions: instructions });
+    // Set voice
+    client.updateSession({ voice: 'echo' });
     // Set transcription, otherwise we don't get user transcriptions back
     client.updateSession({ input_audio_transcription: { model: 'whisper-1' } });
 
@@ -381,18 +365,22 @@ export function ConsolePage() {
       }
     });
     client.on('conversation.updated', async ({ item, delta }: any) => {
-      const items = client.conversation.getItems();
-      if (delta?.audio) {
-        wavStreamPlayer.add16BitPCM(delta.audio, item.id);
-      }
-      const cleanedItems = items.map(item => {
-        if (item.formatted?.file) {
-          const { file, ...rest } = item.formatted;
-          return { ...item, formatted: rest };
+      try {
+        const items = client.conversation.getItems();
+        if (delta?.audio && items.find(i => i.id === item.id)) {
+          await wavStreamPlayer.add16BitPCM(delta.audio, item.id);
         }
-        return item;
-      });
-      setItems(cleanedItems);
+        const cleanedItems = items.map(item => {
+          if (item.formatted?.file) {
+            const { file, ...rest } = item.formatted;
+            return { ...item, formatted: rest };
+          }
+          return item;
+        });
+        setItems(cleanedItems);
+      } catch (error) {
+        console.warn('Error processing conversation update:', error);
+      }
     });
 
     setItems(client.conversation.getItems());
@@ -411,7 +399,7 @@ export function ConsolePage() {
       <div className="content-top">
         <div className="content-title">
           <img src="/openai-logomark.svg" />
-          <span>realtime console</span>
+          <span>live love</span>
         </div>
         <div className="content-api-key">
           {!LOCAL_RELAY_SERVER_URL && (
@@ -427,36 +415,40 @@ export function ConsolePage() {
       </div>
       <div className="content-main">
         <div className="content-logs">
-          <div className="content-actions">
-            <Toggle
-              defaultValue={false}
-              labels={['manual', 'vad']}
-              values={['none', 'server_vad']}
-              onChange={(_, value) => changeTurnEndType(value)}
-            />
-            <div className="spacer" />
-            {isConnected && canPushToTalk && (
-              <Button
-                label={isRecording ? 'release to send' : 'push to talk'}
-                buttonStyle={isRecording ? 'alert' : 'regular'}
-                disabled={!isConnected || !canPushToTalk}
-                onMouseDown={startRecording}
-                onMouseUp={stopRecording}
-              />
-            )}
-            <div className="spacer" />
-            <Button
-              label={isConnected ? 'disconnect' : 'connect'}
-              iconPosition={isConnected ? 'end' : 'start'}
-              icon={isConnected ? X : Zap}
-              buttonStyle={isConnected ? 'regular' : 'action'}
-              onClick={
-                isConnected ? disconnectConversation : connectConversation
-              }
-            />
-          </div>
+          {/* Remove content-actions from here */}
         </div>
       </div>
+      {/* Add content-actions here at root level */}
+      <div className="content-actions">
+        <Toggle
+          defaultValue={false}
+          labels={['push', 'live']}
+          values={['none', 'server_vad']}
+          onChange={(_, value) => changeTurnEndType(value)}
+        />
+        <div className="spacer" />
+        {isConnected && canPushToTalk && (
+          <Button
+            label={isRecording ? 'release to send' : 'push to talk'}
+            buttonStyle={isRecording ? 'alert' : 'regular'}
+            disabled={!isConnected || !canPushToTalk}
+            onMouseDown={startRecording}
+            onMouseUp={stopRecording}
+          />
+        )}
+        <div className="spacer" />
+        <Button
+          label={isConnected ? 'disconnect' : 'connect'}
+          iconPosition={isConnected ? 'end' : 'start'}
+          icon={isConnected ? X : Zap}
+          buttonStyle={isConnected ? 'regular' : 'action'}
+          onClick={isConnected ? disconnectConversation : connectConversation}
+        />
+      </div>
+      <div
+        className="center-circle"
+        style={{ transform: `translate(-50%, -50%) scale(${circleScale})` }}
+      ></div>
     </div>
   );
 }
